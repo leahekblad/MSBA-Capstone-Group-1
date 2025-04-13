@@ -1,0 +1,429 @@
+---
+title: "Test, Train, and Combined Data Sets"
+author: "Whitney Holt"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r include=FALSE, echo = FALSE, warnings = FALSE, message = FALSE}
+library(tidyverse)
+library(knitr)
+library(readxl)
+```
+
+# Combined Data Set
+
+## Loading & Joining Data
+
+Loading in data sets:
+
+```{r}
+# Import data sets
+transactional_data <- read.csv(file = "transactional_data.csv", stringsAsFactors = TRUE)
+customer_profile <- read.csv(file = "customer_profile.csv", stringsAsFactors = TRUE)
+customer_address_and_zip_mapping <- read.csv(file = "customer_address_and_zip_mapping.csv", stringsAsFactors = TRUE)
+delivery_cost_data <- read_excel("delivery_cost_data.xlsx")
+```
+
+Combining transaction and customer data into one data set:
+
+```{r}
+# Join transactional and customer profile data
+transaction_customer_data <- transactional_data %>%
+                             left_join(customer_profile, by = c("CUSTOMER_NUMBER" = "CUSTOMER_NUMBER"))
+
+# Join customer address data
+transaction_customer_data <- transaction_customer_data %>%
+                             left_join(customer_address_and_zip_mapping, by = c("ZIP_CODE" = "zip"))
+```
+
+## Feature Engineering from the EDA
+
+Creating new variables from Exploratory Data Analysis (EDA):
+
+**Total Units Ordered**
+
+ - Description: used to quantify total units ordered, which are then used to determine when a threshold is reached
+ - Calculation: sum of two existing variables
+
+```{r}
+# Total Units Ordered
+transaction_customer_data$TOTAL_UNITS_ORDERED <- transaction_customer_data$ORDERED_GALLONS + transaction_customer_data$ORDERED_CASES
+```
+
+**Total Units Loaded**
+
+ - Description: used to quantify total units loaded
+ - Calculation: sum of two existing variables
+
+```{r}
+# Total Units Loaded
+transaction_customer_data$TOTAL_UNITS_LOADED <- transaction_customer_data$LOADED_GALLONS + transaction_customer_data$LOADED_CASES
+```
+
+**Total Units Delivered**
+
+ - Description: used to quantify total units delivered
+ - Calculation: sum of two existing variables
+
+```{r}
+# Total Units Loaded
+transaction_customer_data$TOTAL_UNITS_DELIVERED <- transaction_customer_data$DELIVERED_GALLONS + transaction_customer_data$DELIVERED_CASES
+```
+
+**Order Grouping**
+
+ - Description: used to identify customers who are ordering less or more than 400 units per year
+ - Calculation: logical statement utilizing level of detail (LOD) calculation functionality
+
+```{r}
+transaction_customer_data$ORDER_GROUPING <- (transaction_customer_data %>%
+                                            group_by(YEAR, CUSTOMER_NUMBER) %>%
+                                            mutate(TOTAL_UNITS_ORDERED = sum(TOTAL_UNITS_ORDERED)) %>%
+                                            ungroup() %>%
+                                            mutate(ORDER_GROUPING = as.factor(ifelse(TOTAL_UNITS_ORDERED < 400, 
+                                                                                                'Customers Ordering Less than 400', 
+                                                                                                'Customers Ordering More than 400'))))$ORDER_GROUPING
+```
+
+**Customer Group Number (Rollup)**
+
+- Description: used to aggregate transactions up to the customer group number, if desired
+- Calculation: logical statement using two existing variables
+
+```{r}
+transaction_customer_data$CUSTOMER_GROUP_NUMBER_ROLLUP <- ifelse(!is.na(transaction_customer_data$PRIMARY_GROUP_NUMBER), 
+                                                                 transaction_customer_data$PRIMARY_GROUP_NUMBER, 
+                                                                 transaction_customer_data$CUSTOMER_NUMBER)
+```
+
+## New Feature Engineering: Calculating Delivery Cost per Customer
+
+Steps provided by SWIRE:
+
+ 1. Determine the volume range for each category (Fountain and Bottles/ Cans)
+ 2. Retrieve the median delivery cost per unit from the data set.
+ 3. Multiply the cost per unit by the quantity purchased for each category.
+ 4. Sum the delivery costs to get the total.
+ 
+We'll start by calculating the total volume purchased by each customer in each category per year. 
+
+```{r}
+# Summarize the total volume purchased for each category
+annual_volume <- transaction_customer_data %>%
+  group_by(YEAR, CUSTOMER_NUMBER, COLD_DRINK_CHANNEL) %>%
+  summarize(
+    Total_Fountain = sum(ORDERED_GALLONS),
+    Total_Bottles_Cans = sum(ORDERED_CASES)
+  ) %>%
+  ungroup()
+
+# View the result
+head(annual_volume, n = 5)
+tail(annual_volume, n = 5)
+```
+
+Next, we need to determine the range each fountain and bottle/ can value falls into, writing a function to do so.
+
+```{r}
+# Ensure Vol Range is a character
+delivery_costs <- delivery_cost_data %>%
+  mutate(`Vol Range` = as.character(`Vol Range`))
+
+# Function to get the delivery cost based on volume range
+get_delivery_cost <- function(volume, category, channel) {
+  if (volume >= 0 & volume <= 149) {
+    cost <- delivery_costs %>%
+      filter(`Cold Drink Channel` == channel, `Applicable To` == category, `Vol Range` == "0 - 149") %>%
+      select(`Median Delivery Cost`) %>%
+      pull()
+  } else if (volume >= 150 & volume <= 299) {
+    cost <- delivery_costs %>%
+      filter(`Cold Drink Channel` == channel, `Applicable To` == category, `Vol Range` == "150 - 299") %>%
+      select(`Median Delivery Cost`) %>%
+      pull()
+  } else if (volume >= 300 & volume <= 449) {
+    cost <- delivery_costs %>%
+      filter(`Cold Drink Channel` == channel, `Applicable To` == category, `Vol Range` == "300 - 449") %>%
+      select(`Median Delivery Cost`) %>%
+      pull()
+  } else if (volume >= 450 & volume <= 599) {
+    cost <- delivery_costs %>%
+      filter(`Cold Drink Channel` == channel, `Applicable To` == category, `Vol Range` == "450 - 599") %>%
+      select(`Median Delivery Cost`) %>%
+      pull()
+  } else if (volume >= 600 & volume <= 749) {
+    cost <- delivery_costs %>%
+      filter(`Cold Drink Channel` == channel, `Applicable To` == category, `Vol Range` == "600 - 749") %>%
+      select(`Median Delivery Cost`) %>%
+      pull()
+  } else if (volume >= 750 & volume <= 899) {
+    cost <- delivery_costs %>%
+      filter(`Cold Drink Channel` == channel, `Applicable To` == category, `Vol Range` == "750 - 899") %>%
+      select(`Median Delivery Cost`) %>%
+      pull()
+  } else if (volume >= 900 & volume <= 1049) {
+    cost <- delivery_costs %>%
+      filter(`Cold Drink Channel` == channel, `Applicable To` == category, `Vol Range` == "900 - 1049") %>%
+      select(`Median Delivery Cost`) %>%
+      pull()
+  } else if (volume >= 1050 & volume <= 1199) {
+    cost <- delivery_costs %>%
+      filter(`Cold Drink Channel` == channel, `Applicable To` == category, `Vol Range` == "1050 - 1199") %>%
+      select(`Median Delivery Cost`) %>%
+      pull()
+  } else if (volume >= 1200 & volume <= 1349) {
+    cost <- delivery_costs %>%
+      filter(`Cold Drink Channel` == channel, `Applicable To` == category, `Vol Range` == "1200 - 1349") %>%
+      select(`Median Delivery Cost`) %>%
+      pull()
+  } else if (volume >= 1350) {
+    cost <- delivery_costs %>%
+      filter(`Cold Drink Channel` == channel, `Applicable To` == category, `Vol Range` == "1350+") %>%
+      select(`Median Delivery Cost`) %>%
+      pull()
+  } else {
+    cost <- 0
+  }
+  return(ifelse(length(cost) > 0, cost, 0))
+}
+```
+
+Next, we'll calculate the total delivery cost for each customer.
+
+```{r}
+# Calculate the total delivery cost for each customer
+annual_volume <- annual_volume %>%
+  rowwise() %>%
+  mutate(
+    Fountain_Cost = get_delivery_cost(Total_Fountain, "Fountain", COLD_DRINK_CHANNEL) * Total_Fountain,
+    Bottles_Cans_Cost = get_delivery_cost(Total_Bottles_Cans, "Bottles and Cans", COLD_DRINK_CHANNEL) * Total_Bottles_Cans,
+    Total_Delivery_Cost = Fountain_Cost + Bottles_Cans_Cost
+  ) %>%
+  ungroup()
+
+# View the result
+head(annual_volume, n = 5)
+tail(annual_volume, n = 5)
+```
+
+Last, we'll add the total delivery cost column to our main data set.
+
+```{r}
+# Merge the total delivery cost back into the transaction_customer_data table
+transaction_customer_data <- transaction_customer_data %>%
+  left_join(annual_volume %>% select(CUSTOMER_NUMBER, YEAR, Total_Delivery_Cost), 
+            by = c("CUSTOMER_NUMBER" = "CUSTOMER_NUMBER", "YEAR" = "YEAR"))
+
+# View the result
+head(transaction_customer_data, n = 5)
+tail(transaction_customer_data, n = 5)
+```
+
+### Exporting Data
+
+```{r}
+write.csv(transaction_customer_data, "transaction_customer_data.csv", row.names = FALSE)
+```
+
+# Test & Train Data Set
+
+## Defining test and train sets of disaggregated data
+
+Because some customers have data in just 2023 or 2024, we want to make sure we split those customers into train and test sets proportionately.
+
+The plan is to:
+
+ - Identify customers with data in 2023, 2024, both years, and only one of the years.
+ - Split the customers into train and test sets based on the specified proportions.
+ - Create the train and test sets using the transaction_customer_data table.
+ 
+```{r}
+# Identify customers with data in 2023 and 2024
+customers_2023 <- transaction_customer_data %>%
+  filter(YEAR == 2023) %>%
+  select(CUSTOMER_NUMBER) %>%
+  distinct()
+
+customers_2024 <- transaction_customer_data %>%
+  filter(YEAR == 2024) %>%
+  select(CUSTOMER_NUMBER) %>%
+  distinct()
+
+# Identify customers with data in both years, only 2023, and only 2024
+customers_both_years <- intersect(customers_2023$CUSTOMER_NUMBER, customers_2024$CUSTOMER_NUMBER)
+customers_only_2023 <- setdiff(customers_2023$CUSTOMER_NUMBER, customers_2024$CUSTOMER_NUMBER)
+customers_only_2024 <- setdiff(customers_2024$CUSTOMER_NUMBER, customers_2023$CUSTOMER_NUMBER)
+
+# Function to split customers into train and test sets
+split_customers <- function(customers, train_ratio = 0.7) {
+  set.seed(123) # For reproducibility
+  train_indices <- sample(seq_len(length(customers)), size = floor(train_ratio * length(customers)))
+  train_customers <- customers[train_indices]
+  test_customers <- customers[-train_indices]
+  return(list(train = train_customers, test = test_customers))
+}
+
+# Split customers into train and test sets
+split_both_years <- split_customers(customers_both_years)
+split_only_2023 <- split_customers(customers_only_2023)
+split_only_2024 <- split_customers(customers_only_2024)
+
+# Combine train and test customers
+train_customers <- c(split_both_years$train, split_only_2023$train, split_only_2024$train)
+test_customers <- c(split_both_years$test, split_only_2023$test, split_only_2024$test)
+
+# Create train and test sets
+train_set <- transaction_customer_data %>%
+  filter(CUSTOMER_NUMBER %in% train_customers)
+
+test_set <- transaction_customer_data %>%
+  filter(CUSTOMER_NUMBER %in% test_customers)
+
+# View the results
+print("Train Set:")
+head(train_set, n = 5)
+tail(train_set, n = 5)
+print("Test Set:")
+head(test_set, n = 5)
+tail(test_set, n = 5)
+```
+
+Let's test to make sure each customer (and all of their transactions) end up in either the train set or the test set, and aren't split among the two:
+
+```{r}
+# Check for overlap
+overlap_customers <- intersect(train_customers, test_customers)
+if (length(overlap_customers) == 0) {
+  print("No overlap between train and test customers.")
+} else {
+  print("Overlap found between train and test customers.")
+}
+```
+
+### Exporting Data
+
+```{r}
+write.csv(train_set, "train_set.csv", row.names = FALSE)
+write.csv(test_set, "test_set.csv", row.names = FALSE)
+```
+
+## Defining test and train sets of aggregated data
+
+These sets are still quite large let's aggregate each row up to the customer and year level so there is one row per customer per year. This will decrease the time required to create and test the models.
+
+```{r}
+# Assigning columns a group
+dimensions <- c("ORDER_TYPE", 
+                "PRIMARY_GROUP_NUMBER",
+                "FREQUENT_ORDER_TYPE",
+                "FIRST_DELIVERY_DATE",
+                "ON_BOARDING_DATE",
+                "COLD_DRINK_CHANNEL",
+                "TRADE_CHANNEL",
+                "SUB_TRADE_CHANNEL",
+                "LOCAL_MARKET_PARTNER",
+                "CO2_CUSTOMER",
+                "ZIP_CODE",
+                "full.address",
+                "ORDER_GROUPING",
+                "CUSTOMER_GROUP_NUMBER_ROLLUP")
+
+measures <- c("ORDERED_CASES", 
+              "LOADED_CASES", 
+              "DELIVERED_CASES",
+              "ORDERED_GALLONS",
+              "LOADED_GALLONS",
+              "DELIVERED_GALLONS",
+              "TOTAL_UNITS_ORDERED",
+              "TOTAL_UNITS_LOADED",
+              "TOTAL_UNITS_DELIVERED") 
+
+drop_columns <- c("WEEK", 
+                  "TRANSACTION_DATE") 
+
+already_aggregated <- "Total_Delivery_Cost" 
+
+# Aggregate the data
+aggregated_data <- transaction_customer_data %>%
+  select(-one_of(drop_columns)) %>% # Drop unnecessary columns
+  group_by(CUSTOMER_NUMBER, YEAR) %>%
+  summarize(across(all_of(dimensions), first), # Keep dimensions as-is
+            across(all_of(measures), sum, .names = "sum_{col}"), # Sum measures
+            across(all_of(already_aggregated), first)) # Keep already aggregated column as-is
+
+# View the results
+print("Aggregated Data:")
+head(aggregated_data, n = 5)
+tail(aggregated_data, n = 5)
+
+# Aggregate the train set
+aggregated_train_set <- train_set %>%
+  select(-one_of(drop_columns)) %>% # Drop unnecessary columns
+  group_by(CUSTOMER_NUMBER, YEAR) %>%
+  summarize(across(all_of(dimensions), first), # Keep dimensions as-is
+            across(all_of(measures), sum, .names = "sum_{col}"), # Sum measures
+            across(all_of(already_aggregated), first)) # Keep already aggregated column as-is
+
+# Aggregate the test set
+aggregated_test_set <- test_set %>%
+  select(-one_of(drop_columns)) %>% # Drop unnecessary columns
+  group_by(CUSTOMER_NUMBER, YEAR) %>%
+  summarize(across(all_of(dimensions), first), # Keep dimensions as-is
+            across(all_of(measures), sum, .names = "sum_{col}"), # Sum measures
+            across(all_of(already_aggregated), first)) # Keep already aggregated column as-is
+
+# View the results
+print("Aggregated Train Set:")
+head(aggregated_train_set, n = 5)
+tail(aggregated_train_set, n = 5)
+
+print("Aggregated Test Set:")
+head(aggregated_test_set, n = 5)
+tail(aggregated_test_set, n = 5)
+```
+
+Lastly, I want to make sure that I am using 2023 data to predict Total Units ordered in 2024.
+
+```{r}
+# Separate the data into 2023 and 2024 subsets
+train_data_2023 <- aggregated_train_set %>% filter(YEAR == 2023)
+train_data_2024 <- aggregated_train_set %>% filter(YEAR == 2024)
+test_data_2023 <- aggregated_test_set %>% filter(YEAR == 2023)
+test_data_2024 <- aggregated_test_set %>% filter(YEAR == 2024)
+
+# Merge the 2023 and 2024 data based on customer number
+train_merged_data <- merge(train_data_2023, train_data_2024, by = "CUSTOMER_NUMBER", suffixes = c("_2023", "_2024"))
+test_merged_data <- merge(test_data_2023, test_data_2024, by = "CUSTOMER_NUMBER", suffixes = c("_2023", "_2024"))
+
+# Select relevant
+train_set <- train_merged_data %>% select(CUSTOMER_NUMBER, ends_with("_2023"), sum_TOTAL_UNITS_ORDERED_2024)
+test_set <- test_merged_data %>% select(CUSTOMER_NUMBER, ends_with("_2023"), sum_TOTAL_UNITS_ORDERED_2024)
+```
+
+### Exporting Data
+
+```{r}
+write.csv(train_set, "train_set_aggregated.csv", row.names = FALSE)
+write.csv(test_set, "test_set_aggregated.csv", row.names = FALSE)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

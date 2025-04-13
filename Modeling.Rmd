@@ -1,0 +1,1283 @@
+---
+title: "IS 6813 Modeling Combined"
+author: "Whitney Holt, Maddie Lee, Leah Ekblad, and Alexia Wells"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+execute:
+  warning: FALSE
+  message: FALSE
+---
+
+```{r include = FALSE, echo = FALSE, warnings = FALSE, message = FALSE}
+# Loading packages, will not be included in knitted file 
+
+library(vroom) # for quickly reading in/writing out
+library(tidymodels)
+library(lubridate) # to seperate date 
+library(DataExplorer)
+library(MASS)
+library(tidyverse)
+library(knitr)
+library(readxl)
+library(Metrics)
+library(car)
+library(caret)
+library(glmnet)
+library(forecast)
+library(prophet)
+library(randomForest)
+library(ggplot2)
+library(caret)
+library(tidymodels)
+library(timetk)
+library(caretEnsemble)
+library(doParallel)
+library(readxl)
+options(warn=-1)
+suppressWarnings({
+  suppressMessages({
+    library(xgboost)
+  })
+})
+```
+
+# Introduction
+
+## Business Problem Statement
+
+Swire Coca-Cola (SCCU) aims to optimize delivery logistics by shifting low-volume customers to cost-efficient Alternate Routes to Market (ARTM/ white truck delivery) using third-party services. However, this may inadvertently move high-growth potential customers to less personalized service, risking revenue loss and weaker relationships. The purpose of this project is to establish a reliable, data-informed systematic method to identify and predict high-potential customers, balancing efficiency with sustainable growth.
+
+## Analytics Approach
+
+Our team will develop several supervised machine learning models which will be used to predict total units ordered per customer. Leveraging historical sales and delivery data, resulting models will help identify ARTM customers with potential for volume growth, ensuring cost-efficient truck assignments and forecasting high-cost customers before they exceed thresholds. Models will be trained using a set of customers and tested using another set of mutually exclusive customers. Performance will be evaluated based on key metrics such as RMSE and R² to evaluate each model's accuracy.
+
+Following the modeling process, a dashboard will be constructed to illustrate results. The goal of this dashboard is to help logistics teams and operations managers classify deliveries into White Truck vs. Red Truck based on key order attributes. By integrating clustering techniques, this dashboard will automate truck assignments, reduce delivery costs, and improve operational efficiency. Ultimately, the desire is to determine how to integrate the insights into a routine strategy to support long-term growth while maintaining logistical efficiency.
+
+# Group Member Contibutions
+
+Each member of our group developed at least one supervised machine learning model, explored additional feature engineering, and interpreted results.
+
+-   Maddie Lee
+    - Linear Regression
+    - Ridge Regression
+    - Lasso Regression
+    - Random Forest
+    - XGBoost
+    - Elastic Net Regression
+    - Decision Tree
+    - Gradient Boosting Machine
+    - Stepwise Linear Regression
+    - ARIMA
+    - Error-Trend-Seasonality (ETS)
+    - Facebook Prophet
+    - XGBoost for Time Series
+    - Gradient Boosting Machine
+-   Alexia Wells
+    - Additional data preparation and feature engineering 
+    - Linear regression on Total units ordered for 2023 + 2024 
+    - Contributed to conclusions
+-   Leah Ekblad
+    - Data preparation
+    - Linear Model for 2023 and 2024
+    - RIDGE and LASSO regression models for 2023 and 2024
+-   Whitney Holt
+    - Data preprocessing
+    - Notebook-wide feature engineering
+    - Baseline performance benchmark models: mean & median models
+    - RIDGE, LASSO, and Elastic Net regression models
+
+# Modeling Process
+
+## Notebook-wide Preprocessing
+
+### Loading & Joining Data
+
+Loading in data sets:
+
+```{r eval=FALSE}
+# Import data sets
+transactional_data <- read.csv(file = "transactional_data.csv", stringsAsFactors = TRUE)
+customer_profile <- read.csv(file = "customer_profile.csv", stringsAsFactors = TRUE)
+customer_address_and_zip_mapping <- read.csv(file = "customer_address_and_zip_mapping.csv", stringsAsFactors = TRUE)
+delivery_cost_data <- read_excel("delivery_cost_data.xlsx")
+```
+
+Combining transaction and customer data into one data set:
+
+```{r eval=FALSE}
+# Join transactional and customer profile data
+transaction_customer_data <- transactional_data %>%
+                             left_join(customer_profile, by = c("CUSTOMER_NUMBER" = "CUSTOMER_NUMBER"))
+
+# Join customer address data
+transaction_customer_data <- transaction_customer_data %>%
+                             left_join(customer_address_and_zip_mapping, by = c("ZIP_CODE" = "zip"))
+```
+
+### Feature Engineering from the EDA
+
+Creating new variables from Exploratory Data Analysis (EDA):
+
+**Total Units Ordered**
+
+-   Description: used to quantify total units ordered, which are then used to determine when a threshold is reached
+-   Calculation: sum of two existing variables
+
+```{r eval=FALSE}
+# Total Units Ordered
+transaction_customer_data$TOTAL_UNITS_ORDERED <- transaction_customer_data$ORDERED_GALLONS + transaction_customer_data$ORDERED_CASES
+```
+
+**Total Units Loaded**
+
+-   Description: used to quantify total units loaded
+-   Calculation: sum of two existing variables
+
+```{r eval=FALSE}
+# Total Units Loaded
+transaction_customer_data$TOTAL_UNITS_LOADED <- transaction_customer_data$LOADED_GALLONS + transaction_customer_data$LOADED_CASES
+```
+
+**Total Units Delivered**
+
+-   Description: used to quantify total units delivered
+-   Calculation: sum of two existing variables
+
+```{r eval=FALSE}
+# Total Units Loaded
+transaction_customer_data$TOTAL_UNITS_DELIVERED <- transaction_customer_data$DELIVERED_GALLONS + transaction_customer_data$DELIVERED_CASES
+```
+
+**Order Grouping**
+
+-   Description: used to identify customers who are ordering less or more than 400 units per year
+-   Calculation: logical statement utilizing level of detail (LOD) calculation functionality
+
+```{r eval=FALSE}
+transaction_customer_data$ORDER_GROUPING <- (transaction_customer_data %>%
+                                            group_by(YEAR, CUSTOMER_NUMBER) %>%
+                                            mutate(TOTAL_UNITS_ORDERED = sum(TOTAL_UNITS_ORDERED)) %>%
+                                            ungroup() %>%
+                                            mutate(ORDER_GROUPING = as.factor(ifelse(TOTAL_UNITS_ORDERED < 400, 
+                                                                                                'Customers Ordering Less than 400', 
+                                                                                                'Customers Ordering More than 400'))))$ORDER_GROUPING
+```
+
+**Customer Group Number (Rollup)**
+
+-   Description: used to aggregate transactions up to the customer group number, if desired
+-   Calculation: logical statement using two existing variables
+
+```{r eval=FALSE}
+transaction_customer_data$CUSTOMER_GROUP_NUMBER_ROLLUP <- ifelse(!is.na(transaction_customer_data$PRIMARY_GROUP_NUMBER), 
+                                                                 transaction_customer_data$PRIMARY_GROUP_NUMBER, 
+                                                                 transaction_customer_data$CUSTOMER_NUMBER)
+```
+
+### New Feature Engineering: Calculating Delivery Cost per Customer
+
+Steps provided by SWIRE:
+
+1.  Determine the volume range for each category (Fountain and Bottles/ Cans)
+2.  Retrieve the median delivery cost per unit from the data set.
+3.  Multiply the cost per unit by the quantity purchased for each category.
+4.  Sum the delivery costs to get the total.
+
+We'll start by calculating the total volume purchased by each customer in each category per year.
+
+```{r eval=FALSE}
+# Summarize the total volume purchased for each category
+annual_volume <- transaction_customer_data %>%
+  group_by(YEAR, CUSTOMER_NUMBER, COLD_DRINK_CHANNEL) %>%
+  summarize(
+    Total_Fountain = sum(ORDERED_GALLONS),
+    Total_Bottles_Cans = sum(ORDERED_CASES)
+  ) %>%
+  ungroup()
+```
+
+Next, we need to determine the range each fountain and bottle/ can value falls into, writing a function to do so.
+
+```{r eval=FALSE}
+# Ensure Vol Range is a character
+delivery_costs <- delivery_cost_data %>%
+  mutate(`Vol Range` = as.character(`Vol Range`))
+
+# Function to get the delivery cost based on volume range
+get_delivery_cost <- function(volume, category, channel) {
+  if (volume >= 0 & volume <= 149) {
+    cost <- delivery_costs %>%
+      filter(`Cold Drink Channel` == channel, `Applicable To` == category, `Vol Range` == "0 - 149") %>%
+      select(`Median Delivery Cost`) %>%
+      pull()
+  } else if (volume >= 150 & volume <= 299) {
+    cost <- delivery_costs %>%
+      filter(`Cold Drink Channel` == channel, `Applicable To` == category, `Vol Range` == "150 - 299") %>%
+      select(`Median Delivery Cost`) %>%
+      pull()
+  } else if (volume >= 300 & volume <= 449) {
+    cost <- delivery_costs %>%
+      filter(`Cold Drink Channel` == channel, `Applicable To` == category, `Vol Range` == "300 - 449") %>%
+      select(`Median Delivery Cost`) %>%
+      pull()
+  } else if (volume >= 450 & volume <= 599) {
+    cost <- delivery_costs %>%
+      filter(`Cold Drink Channel` == channel, `Applicable To` == category, `Vol Range` == "450 - 599") %>%
+      select(`Median Delivery Cost`) %>%
+      pull()
+  } else if (volume >= 600 & volume <= 749) {
+    cost <- delivery_costs %>%
+      filter(`Cold Drink Channel` == channel, `Applicable To` == category, `Vol Range` == "600 - 749") %>%
+      select(`Median Delivery Cost`) %>%
+      pull()
+  } else if (volume >= 750 & volume <= 899) {
+    cost <- delivery_costs %>%
+      filter(`Cold Drink Channel` == channel, `Applicable To` == category, `Vol Range` == "750 - 899") %>%
+      select(`Median Delivery Cost`) %>%
+      pull()
+  } else if (volume >= 900 & volume <= 1049) {
+    cost <- delivery_costs %>%
+      filter(`Cold Drink Channel` == channel, `Applicable To` == category, `Vol Range` == "900 - 1049") %>%
+      select(`Median Delivery Cost`) %>%
+      pull()
+  } else if (volume >= 1050 & volume <= 1199) {
+    cost <- delivery_costs %>%
+      filter(`Cold Drink Channel` == channel, `Applicable To` == category, `Vol Range` == "1050 - 1199") %>%
+      select(`Median Delivery Cost`) %>%
+      pull()
+  } else if (volume >= 1200 & volume <= 1349) {
+    cost <- delivery_costs %>%
+      filter(`Cold Drink Channel` == channel, `Applicable To` == category, `Vol Range` == "1200 - 1349") %>%
+      select(`Median Delivery Cost`) %>%
+      pull()
+  } else if (volume >= 1350) {
+    cost <- delivery_costs %>%
+      filter(`Cold Drink Channel` == channel, `Applicable To` == category, `Vol Range` == "1350+") %>%
+      select(`Median Delivery Cost`) %>%
+      pull()
+  } else {
+    cost <- 0
+  }
+  return(ifelse(length(cost) > 0, cost, 0))
+}
+```
+
+Next, we'll calculate the total delivery cost for each customer.
+
+```{r eval=FALSE}
+# Calculate the total delivery cost for each customer
+annual_volume <- annual_volume %>%
+  rowwise() %>%
+  mutate(
+    Fountain_Cost = get_delivery_cost(Total_Fountain, "Fountain", COLD_DRINK_CHANNEL) * Total_Fountain,
+    Bottles_Cans_Cost = get_delivery_cost(Total_Bottles_Cans, "Bottles and Cans", COLD_DRINK_CHANNEL) * Total_Bottles_Cans,
+    Total_Delivery_Cost = Fountain_Cost + Bottles_Cans_Cost
+  ) %>%
+  ungroup()
+```
+
+Last, we'll add the total delivery cost column to our main data set.
+
+```{r eval=FALSE}
+# Merge the total delivery cost back into the transaction_customer_data table
+transaction_customer_data <- transaction_customer_data %>%
+  left_join(annual_volume %>% select(CUSTOMER_NUMBER, YEAR, Total_Delivery_Cost), 
+            by = c("CUSTOMER_NUMBER" = "CUSTOMER_NUMBER", "YEAR" = "YEAR"))
+```
+
+### Handling NAs
+
+There are two fields with missing (or null) values, each was handles separately:
+
+-   Order Type
+    -   Replaced null values with 'unknown', as to not lose 12% of the data points.
+-   Primary Group Number
+    -   Created a new variable 'Customer Group Number (Rollup)', named CUSTOMER_GROUP_NUMBER_ROLLUP in the data set.
+    -   This new variable represents the primary group number, if available, and the customer number otherwise.
+    -   This allows for the aggregation transactions up to primary group membership if desired.
+
+## Defining Train & Test Sets
+
+Because some customers have data in just 2023 or 2024, we want to make sure we split those customers into train and test sets proportionately.
+
+The plan is to:
+
+-   Identify customers with data in 2023, 2024, both years, and only one of the years.
+-   Split the customers into train and test sets based on the specified proportions.
+-   Create the train and test sets using the transaction_customer_data table.
+
+```{r eval=FALSE}
+# Identify customers with data in 2023 and 2024
+customers_2023 <- transaction_customer_data %>%
+  filter(YEAR == 2023) %>%
+  select(CUSTOMER_NUMBER) %>%
+  distinct()
+
+customers_2024 <- transaction_customer_data %>%
+  filter(YEAR == 2024) %>%
+  select(CUSTOMER_NUMBER) %>%
+  distinct()
+
+# Identify customers with data in both years, only 2023, and only 2024
+customers_both_years <- intersect(customers_2023$CUSTOMER_NUMBER, customers_2024$CUSTOMER_NUMBER)
+customers_only_2023 <- setdiff(customers_2023$CUSTOMER_NUMBER, customers_2024$CUSTOMER_NUMBER)
+customers_only_2024 <- setdiff(customers_2024$CUSTOMER_NUMBER, customers_2023$CUSTOMER_NUMBER)
+
+# Function to split customers into train and test sets
+split_customers <- function(customers, train_ratio = 0.7) {
+  set.seed(123) # For reproducibility
+  train_indices <- sample(seq_len(length(customers)), size = floor(train_ratio * length(customers)))
+  train_customers <- customers[train_indices]
+  test_customers <- customers[-train_indices]
+  return(list(train = train_customers, test = test_customers))
+}
+
+# Split customers into train and test sets
+split_both_years <- split_customers(customers_both_years)
+split_only_2023 <- split_customers(customers_only_2023)
+split_only_2024 <- split_customers(customers_only_2024)
+
+# Combine train and test customers
+train_customers <- c(split_both_years$train, split_only_2023$train, split_only_2024$train)
+test_customers <- c(split_both_years$test, split_only_2023$test, split_only_2024$test)
+
+# Create train and test sets
+train_set <- transaction_customer_data %>%
+  filter(CUSTOMER_NUMBER %in% train_customers)
+
+test_set <- transaction_customer_data %>%
+  filter(CUSTOMER_NUMBER %in% test_customers)
+```
+
+These sets are still quite large let's aggregate each row up to the customer and year level so there is one row per customer per year. This will decrease the time required to create and test the models.
+
+```{r eval=FALSE}
+# Assigning columns a group
+dimensions <- c("ORDER_TYPE", 
+                "PRIMARY_GROUP_NUMBER",
+                "FREQUENT_ORDER_TYPE",
+                "FIRST_DELIVERY_DATE",
+                "ON_BOARDING_DATE",
+                "COLD_DRINK_CHANNEL",
+                "TRADE_CHANNEL",
+                "SUB_TRADE_CHANNEL",
+                "LOCAL_MARKET_PARTNER",
+                "CO2_CUSTOMER",
+                "ZIP_CODE",
+                "full.address",
+                "ORDER_GROUPING",
+                "CUSTOMER_GROUP_NUMBER_ROLLUP")
+
+measures <- c("ORDERED_CASES", 
+              "LOADED_CASES", 
+              "DELIVERED_CASES",
+              "ORDERED_GALLONS",
+              "LOADED_GALLONS",
+              "DELIVERED_GALLONS",
+              "TOTAL_UNITS_ORDERED",
+              "TOTAL_UNITS_LOADED",
+              "TOTAL_UNITS_DELIVERED") 
+
+drop_columns <- c("WEEK", 
+                  "TRANSACTION_DATE") 
+
+already_aggregated <- "Total_Delivery_Cost" 
+
+# Aggregate the data
+aggregated_data <- transaction_customer_data %>%
+  select(-one_of(drop_columns)) %>% # Drop unnecessary columns
+  group_by(CUSTOMER_NUMBER, YEAR) %>%
+  summarize(across(all_of(dimensions), first), # Keep dimensions as-is
+            across(all_of(measures), sum, .names = "sum_{col}"), # Sum measures
+            across(all_of(already_aggregated), first)) # Keep already aggregated column as-is
+
+# Aggregate the train set
+aggregated_train_set <- train_set %>%
+  select(-one_of(drop_columns)) %>% # Drop unnecessary columns
+  group_by(CUSTOMER_NUMBER, YEAR) %>%
+  summarize(across(all_of(dimensions), first), # Keep dimensions as-is
+            across(all_of(measures), sum, .names = "sum_{col}"), # Sum measures
+            across(all_of(already_aggregated), first)) # Keep already aggregated column as-is
+
+# Aggregate the test set
+aggregated_test_set <- test_set %>%
+  select(-one_of(drop_columns)) %>% # Drop unnecessary columns
+  group_by(CUSTOMER_NUMBER, YEAR) %>%
+  summarize(across(all_of(dimensions), first), # Keep dimensions as-is
+            across(all_of(measures), sum, .names = "sum_{col}"), # Sum measures
+            across(all_of(already_aggregated), first)) # Keep already aggregated column as-is
+```
+
+Lastly, we want to make sure that we are using 2023 data to predict Total Units ordered in 2024.
+
+```{r eval=FALSE}
+# Separate the data into 2023 and 2024 subsets
+train_data_2023 <- aggregated_train_set %>% filter(YEAR == 2023)
+train_data_2024 <- aggregated_train_set %>% filter(YEAR == 2024)
+test_data_2023 <- aggregated_test_set %>% filter(YEAR == 2023)
+test_data_2024 <- aggregated_test_set %>% filter(YEAR == 2024)
+
+# Merge the 2023 and 2024 data based on customer number
+train_merged_data <- merge(train_data_2023, train_data_2024, by = "CUSTOMER_NUMBER", suffixes = c("_2023", "_2024"))
+test_merged_data <- merge(test_data_2023, test_data_2024, by = "CUSTOMER_NUMBER", suffixes = c("_2023", "_2024"))
+
+# Select relevant
+train_set <- train_merged_data %>% select(CUSTOMER_NUMBER, ends_with("_2023"), sum_TOTAL_UNITS_ORDERED_2024)
+test_set <- test_merged_data %>% select(CUSTOMER_NUMBER, ends_with("_2023"), sum_TOTAL_UNITS_ORDERED_2024)
+```
+
+## Appropriate Models
+
+Identify appropriate models to explore (given the business problem and the project objective).
+
+-   Supervised regression models
+    -   Linear Regression
+    -   RIDGE Regression
+    -   LASSO Regression
+    -   Elastic Net Regression
+    -   Decision Trees
+    -   Random Forest
+    -   XGBoost
+    -   Gradient Boosting Machines (GBM)
+    -   Support Vector Regression (SVR)
+    -   Neural Networks
+    -   ARIMA
+    -   Error-Trend-Seasonality (ETS)
+    -   Facebook Prophet
+    -   Models by year
+-   Unsupervised models to use after classification is complete
+    -   Clustering
+    -   Principle Components Analysis (PCA)
+
+For the sake of time, our team collectively created the following models:
+
+-   Linear Regression
+-   RIDGE Regression
+-   LASSO Regression
+-   Elastic Net Regression
+-   Decision Trees
+-   Random Forest
+-   XGBoost
+-   Gradient Boosting Machines (GBM)
+-   ARIMA
+-   Error-Trend-Seasonality (ETS)
+-   Facebook Prophet
+-   Models by year
+
+## Performance Benchmark Models
+
+Performance variables of interest:
+
+-   RMSE
+-   R squared
+
+There are a few options for a baseline model, we'll go with:
+
+-   Mean Model
+-   Median Model
+
+### Mean Model
+
+Mean Model: simply predicts the mean of the target variable for all observations.
+
+```{r eval = FALSE}
+# Remove rows with missing values for mean and median models
+train_set_mm <- na.omit(train_set)
+test_set_mm <- na.omit(test_set)
+
+# Calculate the mean of the target variable in the training set
+mean_target <- mean(train_set_mm$sum_TOTAL_UNITS_ORDERED_2024, na.rm = TRUE)
+
+# Predict the mean for all observations in the test set
+mean_predictions <- rep(mean_target, nrow(test_set_mm))
+
+# Calculate RMSE, R-squared, and MAPE for the mean model
+rmse_mean <- RMSE(mean_predictions, test_set_mm$sum_TOTAL_UNITS_ORDERED_2024)
+r_squared_mean <- 1 - sum((test_set_mm$sum_TOTAL_UNITS_ORDERED_2024 - mean_predictions)^2) / sum((test_set_mm$sum_TOTAL_UNITS_ORDERED_2024 - mean(test_set_mm$sum_TOTAL_UNITS_ORDERED_2024))^2)
+mape_mean <- mean(abs((test_set_mm$sum_TOTAL_UNITS_ORDERED_2024 - mean_predictions) / test_set_mm$sum_TOTAL_UNITS_ORDERED_2024)) * 100
+```
+
+Mean Model Performance Discussion:
+
+-   *RMSE (Root Mean Squared Error)*: This metric measures the average magnitude of the errors between the predicted and actual values. An RMSE of 7025.563 indicates that, on average, the predictions are off by about 7,026 units. This is quite high, suggesting that the mean model is not very accurate.
+
+-   *R-squared*: This metric indicates the proportion of the variance in the dependent variable that is predictable from the independent variables. An R-squared value of -7.586425e-05 means that the mean model does not explain any of the variance in the data. In fact, it performs worse than a horizontal line.
+
+### Median Model
+
+Median Model: simply predicts the median of the target variable for all observations. This can be more robust to outliers compared to the mean model.
+
+```{r eval = FALSE}
+# Calculate the median of the target variable in the training set
+median_target <- median(train_set_mm$sum_TOTAL_UNITS_ORDERED_2024, na.rm = TRUE)
+
+# Predict the median for all observations in the test set
+median_predictions <- rep(median_target, nrow(test_set_mm))
+
+# Calculate RMSE, R-squared, and MAPE for the median model
+rmse_median <- RMSE(median_predictions, test_set_mm$sum_TOTAL_UNITS_ORDERED_2024)
+r_squared_median <- 1 - sum((test_set_mm$sum_TOTAL_UNITS_ORDERED_2024 - median_predictions)^2) / sum((test_set_mm$sum_TOTAL_UNITS_ORDERED_2024 - mean(test_set_mm$sum_TOTAL_UNITS_ORDERED_2024))^2)
+mape_median <- mean(abs((test_set_mm$sum_TOTAL_UNITS_ORDERED_2024 - median_predictions) / test_set_mm$sum_TOTAL_UNITS_ORDERED_2024)) * 100
+```
+
+Median Model Performance Discussion:
+
+-   *RMSE (Root Mean Squared Error)*: This metric measures the average magnitude of the errors between the predicted and actual values. An RMSE of 7089.417 indicates that, on average, the predictions are off by about 7,089 units. This is quite high, suggesting that the mean model is not very accurate.
+
+-   *R-squared*: This metric indicates the proportion of the variance in the dependent variable that is predictable from the independent variables. An R-squared value of -0.0183376 is very close to zero and negative, which means that the mean model does not explain any of the variance in the data. In fact, a negative R-squared indicates that the model performs worse than a horizontal line.
+
+The median model performed slightly worse than the mean model.
+
+## Linear & Regularization Regression Models
+
+Cross Validation set up:
+
+```{r  eval=FALSE, warnings = FALSE, modeling}
+options(warn=-1) 
+# Define predictors and target variable
+predictor_vars <- grep("_2023$", colnames(train_set), value = TRUE)
+target_var <- "sum_TOTAL_UNITS_ORDERED_2024"
+
+# Remove rows with missing values
+train_set <- train_set %>% drop_na(all_of(c(predictor_vars, target_var)))
+test_set <- test_set %>% drop_na(all_of(predictor_vars))
+
+# Impute missing values (if needed)
+train_set[predictor_vars] <- train_set[predictor_vars] %>% mutate_all(~ ifelse(is.na(.), median(., na.rm = TRUE), .))
+test_set[predictor_vars] <- test_set[predictor_vars] %>% mutate_all(~ ifelse(is.na(.), median(., na.rm = TRUE), .))
+
+# Define cross-validation setup
+train_control <- trainControl(method = "cv", number = 5)
+```
+
+### Linear Regression
+
+```{r eval = FALSE}
+models$lm <- train(
+  as.formula(paste(target_var, "~ .")),
+  data = train_set,
+  method = "lm",
+  trControl = train_control
+)
+```
+
+### RIDGE Regression
+
+```{r eval = FALSE}
+# Train models (Fix: Keep y in train_set)
+models <- list()
+
+models$ridge <- train(
+  as.formula(paste(target_var, "~ .")),
+  data = train_set,
+  method = "glmnet",
+  trControl = train_control,
+  tuneGrid = expand.grid(alpha = 0, lambda = seq(0.001, 1, length = 10))
+)
+```
+
+### LASSO Regression
+
+```{r eval = FALSE}
+models$lasso <- train(
+  as.formula(paste(target_var, "~ .")),
+  data = train_set,
+  method = "glmnet",
+  trControl = train_control,
+  tuneGrid = expand.grid(alpha = 1, lambda = seq(0.001, 1, length = 10))
+)
+```
+
+### Elastic Net Regression
+
+```{r eval = FALSE}
+# Elastic Net Regression (combines Ridge & Lasso)
+enet_grid <- expand.grid(alpha = seq(0, 1, 0.1), lambda = seq(0.001, 1, length = 10))
+models$enet <- train(as.formula(paste(target_var, "~ .")), data = train_set, method = "glmnet", 
+                     trControl = train_control, tuneGrid = enet_grid)
+```
+
+## Machine Learning Models
+
+### Random Forest
+
+```{r eval = FALSE}
+models$rf <- train(
+  as.formula(paste(target_var, "~ .")),
+  data = train_set,
+  method = "rf",
+  trControl = train_control,
+  tuneGrid = expand.grid(mtry = c(2, 5, 10))
+)
+```
+
+### XGBoost
+
+```{r eval = FALSE}
+xgb_grid <- expand.grid(
+  nrounds = c(50, 100, 200), eta = c(0.01, 0.1, 0.3),
+  max_depth = c(3, 6, 9), gamma = 0, colsample_bytree = 0.8,
+  min_child_weight = 1, subsample = 0.8
+
+models$xgb <- train(
+  as.formula(paste(target_var, "~ .")),
+  data = train_set,
+  method = "xgbTree",
+  trControl = train_control,
+  tuneGrid = xgb_grid
+)
+```
+
+### Decision Tree
+
+```{r eval = FALSE}
+# Decision Tree Model
+models$dt <- train(
+  as.formula(paste(target_var, "~ .")),
+  data = train_set,
+  method = "rpart",
+  trControl = train_control,
+  tuneGrid = expand.grid(cp = seq(0.001, 0.1, by = 0.01))
+)
+```
+
+### Gradient Boosting Maching (GBM)
+
+```{r eval = FALSE}
+# Gradient Boosting Machine (GBM)
+models$gbm <- train(
+  as.formula(paste(target_var, "~ .")),
+  data = train_set,
+  method = "gbm",
+  trControl = train_control,
+  verbose = FALSE
+)
+```
+
+## Stepwise Regression
+
+Feature Importance & AIC-based Model Selection
+
+```{r eval=FALSE}
+# Feature Importance using caret
+importance <- varImp(models$lm, scale = FALSE)
+print(importance)
+plot(importance)
+
+# Train a standard linear regression model outside of caret
+lm_model <- lm(as.formula(paste(target_var, "~ .")), data = train_set)
+
+# Apply stepwise AIC selection
+stepwise_model <- stepAIC(lm_model, direction = "both")
+
+# Display results
+summary(stepwise_model)
+
+# Calculate VIF on the final model after stepwise selection
+vif_values <- vif(stepwise_model)
+print(vif_values)
+
+# Remove features with VIF > 5 (indicating high multicollinearity)
+high_vif_vars <- names(vif_values[vif_values > 5])
+```
+
+## Time Series Models
+
+Preparing data for time series modeling:
+
+```{r  eval = FALSE}
+# Import datasets
+#setwd("/Users/madelinelee/Downloads/")
+
+transactional_data <- read.csv("transactional_data.csv", stringsAsFactors = FALSE)
+customer_profile <- read.csv("customer_profile.csv", stringsAsFactors = FALSE)
+customer_address_and_zip_mapping <- read.csv("customer_address_and_zip_mapping.csv", stringsAsFactors = FALSE)
+delivery_cost_data <- readxl::read_excel("delivery_cost_data.xlsx")
+
+# Join transactional and customer profile data
+transaction_customer_data <- transactional_data %>%
+                             left_join(customer_profile, by = c("CUSTOMER_NUMBER" = "CUSTOMER_NUMBER"))
+
+# Join customer address data
+transaction_customer_data <- transaction_customer_data %>%
+                             left_join(customer_address_and_zip_mapping, by = c("ZIP_CODE" = "zip"))
+
+# Convert TRANSACTION_DATE to Date format
+transaction_customer_data$TRANSACTION_DATE <- as.character(transaction_customer_data$TRANSACTION_DATE)
+transaction_customer_data$Date <- as.Date(transaction_customer_data$TRANSACTION_DATE, format = "%m/%d/%Y")
+
+# Ensure date conversion was successful
+if (sum(is.na(transaction_customer_data$Date)) > 0) {
+  warning("⚠️ WARNING: Some TRANSACTION_DATE values failed to convert.")
+}
+
+# Aggregate daily total orders (calculated as ORDERED_CASES + ORDERED_GALLONS)
+daily_orders <- transaction_customer_data %>%
+  group_by(Date) %>%
+  summarise(
+    Total_Orders = sum(ORDERED_CASES, na.rm = TRUE) + sum(ORDERED_GALLONS, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(Date)
+
+# Fill missing dates with 0 orders
+daily_orders <- daily_orders %>%
+  complete(Date = seq(min(Date), max(Date), by = "day"), fill = list(Total_Orders = 0))
+
+# Split into train and test sets (80% train, 20% test)
+split_point <- floor(0.8 * nrow(daily_orders))
+train_ts <- daily_orders[1:split_point, ]
+test_ts <- daily_orders[(split_point + 1):nrow(daily_orders), ]
+```
+
+### ARIMA
+
+```{r  eval = FALSE}
+# Train ARIMA model
+arima_model <- auto.arima(train_ts$Total_Orders, seasonal = TRUE, stepwise = FALSE, approximation = FALSE)
+
+# Forecast
+arima_preds <- forecast(arima_model, h = nrow(test_ts))$mean
+```
+
+### Error-Trend-Seasonality (ETS) Model
+
+```{r  eval = FALSE}
+# Train ETS model
+ets_model <- ets(train_ts$Total_Orders)
+
+# Forecast
+ets_preds <- forecast(ets_model, h = nrow(test_ts))$mean
+```
+
+### Facebook Prophet
+
+```{r  eval = FALSE}
+# Prepare Prophet data
+prophet_data <- train_ts %>%
+  rename(ds = Date, y = Total_Orders)
+
+# Train Prophet model
+prophet_model <- prophet(prophet_data)
+
+# Create future dates
+future_dates <- make_future_dataframe(prophet_model, periods = nrow(test_ts), freq = "day")
+
+# Predict
+prophet_forecast <- predict(prophet_model, future_dates)
+prophet_preds <- tail(prophet_forecast$yhat, nrow(test_ts))
+```
+
+### XGBoost
+
+```{r eval = FALSE}
+# XGBoost Evaluation
+models_results <- rbind(models_results, data.frame(
+  Model = "XGBoost",
+  RMSE = RMSE(xgb_preds, test_ts$Total_Orders),
+  MAPE = mape(test_ts$Total_Orders, xgb_preds),
+  MAE = MAE(xgb_preds, test_ts$Total_Orders)
+))
+
+# Print model performance
+print(models_results)
+```
+
+## Timeframe Models
+
+Additional preprocessing, accounting for multicollinearity
+
+```{r eval = FALSE}
+train <- vroom("train_set.csv")
+test <- vroom("test_set.csv")
+
+train_set <- train |> 
+   mutate(across(c(CUSTOMER_NUMBER, ORDER_TYPE, PRIMARY_GROUP_NUMBER,
+                  FREQUENT_ORDER_TYPE, COLD_DRINK_CHANNEL, 
+                  TRADE_CHANNEL, SUB_TRADE_CHANNEL, LOCAL_MARKET_PARTNER, 
+                  CO2_CUSTOMER, ZIP_CODE, ORDER_GROUPING), as.factor)) |> 
+  mutate(across(c(TRANSACTION_DATE, FIRST_DELIVERY_DATE, ON_BOARDING_DATE), 
+                ~ as.Date(., format = "%m/%d/%Y"))) |> 
+  mutate(MONTH = month(TRANSACTION_DATE), LOADED_DIFFERENCE = 
+           TOTAL_UNITS_ORDERED - TOTAL_UNITS_LOADED, SHIPMENT_DIFFERENCE = 
+           TOTAL_UNITS_LOADED - TOTAL_UNITS_DELIVERED) |> 
+  mutate(ORDER_GROUPING = ifelse(ORDER_GROUPING == "Customers Ordering Less than 400", 0, 1)) |> # if it is that phrase, replace with 0, if over 400 we want to say 1 
+  mutate(across(c(WEEK, MONTH), as.factor)) |> 
+  mutate(TOTAL_UNITS_ORDERED= ifelse(
+    TOTAL_UNITS_ORDERED == min(TOTAL_UNITS_ORDERED), 
+    TOTAL_UNITS_ORDERED + abs(min(TOTAL_UNITS_ORDERED)) + 0.01,
+    TOTAL_UNITS_ORDERED)) |> 
+  dplyr::select(-c(ORDERED_CASES,LOADED_CASES,DELIVERED_CASES,ORDERED_GALLONS,
+                   LOADED_GALLONS, DELIVERED_GALLONS, TRANSACTION_DATE, 
+                   full.address, ZIP_CODE, PRIMARY_GROUP_NUMBER))
+
+# Now do the same to test 
+test_set <- test |> 
+   mutate(across(c(CUSTOMER_NUMBER, ORDER_TYPE, PRIMARY_GROUP_NUMBER,
+                  FREQUENT_ORDER_TYPE, COLD_DRINK_CHANNEL, 
+                  TRADE_CHANNEL, SUB_TRADE_CHANNEL, LOCAL_MARKET_PARTNER, 
+                  CO2_CUSTOMER, ZIP_CODE, ORDER_GROUPING), as.factor)) |> 
+  mutate(across(c(TRANSACTION_DATE, FIRST_DELIVERY_DATE, ON_BOARDING_DATE), 
+                ~ as.Date(., format = "%m/%d/%Y"))) |> 
+  mutate(MONTH = month(TRANSACTION_DATE), LOADED_DIFFERENCE = 
+           TOTAL_UNITS_ORDERED - TOTAL_UNITS_LOADED, SHIPMENT_DIFFERENCE = 
+           TOTAL_UNITS_LOADED - TOTAL_UNITS_DELIVERED) |> 
+  mutate(ORDER_GROUPING = ifelse(ORDER_GROUPING == "Customers Ordering Less than 400", 0, 1)) |> # if it is that phrase, replace with 0, if over 400 we want to say 1 
+  mutate(across(c(WEEK, MONTH), as.factor)) |> 
+  mutate(TOTAL_UNITS_ORDERED= ifelse(
+    TOTAL_UNITS_ORDERED == min(TOTAL_UNITS_ORDERED), 
+    TOTAL_UNITS_ORDERED + abs(min(TOTAL_UNITS_ORDERED)) + 0.01,
+    TOTAL_UNITS_ORDERED)) |> 
+  dplyr::select(-c(ORDERED_CASES,LOADED_CASES,DELIVERED_CASES,ORDERED_GALLONS,
+                   LOADED_GALLONS, DELIVERED_GALLONS, TRANSACTION_DATE, 
+                   full.address, ZIP_CODE, PRIMARY_GROUP_NUMBER))
+
+# Separate the data into 2023 and 2024 subsets
+
+# By year 2023
+train_2023 <- train_set %>% filter(YEAR == 2023)
+test_2023 <- test_set %>% filter(YEAR == 2023)
+
+# filtered by year 2024
+train_2024 <- train_set %>% filter(YEAR == 2024)
+test_2024 <- test_set %>% filter(YEAR == 2024)
+
+# Full 2024 dataset
+full_2024 <- dplyr::bind_rows(train_2024, test_2024)
+```
+
+### Linear model for 2023
+
+```{r  eval = FALSE}
+# Create a recipe with step_novel for unseen factor levels
+my_recipe <- recipe(TOTAL_UNITS_ORDERED ~ ., data = train_2023_data) %>%
+  step_novel(all_nominal(), new_level = "Unknown") %>%
+  step_dummy(all_nominal(), -all_outcomes()) %>% # should prevent dummy variable trap 
+  step_nzv(all_predictors()) |> 
+  step_select(-TOTAL_UNITS_LOADED, -TOTAL_UNITS_DELIVERED,
+              -SUB_TRADE_CHANNEL_FSR...MISC, -SUB_TRADE_CHANNEL_OTHER.DINING, 
+              -TRADE_CHANNEL_GENERAL, -TRADE_CHANNEL_OUTDOOR.ACTIVITIES, 
+              -SUB_TRADE_CHANNEL_COMPREHENSIVE.PROVIDER) %>%   
+  step_normalize(all_numeric_predictors()) 
+
+# Prepare the recipe with the training data
+prepped <- prep(my_recipe, training = train_2023_data)
+
+# Apply the recipe to the training and test data
+train_transformed23 <- bake(prepped, new_data = train_2023_data)
+test_transformed23 <- bake(prepped, new_data = test_2023)
+
+# Build Linear Regression Model using multiple predictors
+lm_model <- lm(TOTAL_UNITS_ORDERED ~ ., data = train_transformed23)
+
+# Make Predictions
+predictions <- predict(lm_model, newdata = test_transformed23)
+
+# Manually Calculate RMSE, MAE, R-squared, and Adjusted R-squared
+rmse_value <- sqrt(mean((test_transformed23$TOTAL_UNITS_ORDERED - predictions)^2))
+mae_value <- mean(abs(test_transformed23$TOTAL_UNITS_ORDERED - predictions))
+r_squared <- cor(test_transformed23$TOTAL_UNITS_ORDERED, predictions)^2
+
+# Adjusted R-squared calculation
+n <- nrow(test_transformed23)  # Number of observations
+p <- length(lm_model$coefficients) - 1  # Number of predictors
+adj_r_squared <- 1 - ((1 - r_squared) * (n - 1) / (n - p - 1))
+
+# Output Results
+cat("Linear Regression Model Performance:\n")
+cat("RMSE:", rmse_value, "\n")
+cat("R-squared:", r_squared, "\n")
+
+# View Predictions
+output_data <- test_transformed23 %>%
+  mutate(Predicted_UNITS_ORDERED = predictions)
+```
+
+### Linear model for 2024
+
+```{r  eval = FALSE}
+# Create a recipe with step_novel for unseen factor levels
+my_recipe <- recipe(TOTAL_UNITS_ORDERED ~ ., data = train_2024_data) %>%
+  step_novel(all_nominal(), new_level = "Unknown") %>%
+  step_dummy(all_nominal(), -all_outcomes()) %>% # should prevent dummy variable trap 
+  step_nzv(all_predictors()) |> 
+  step_select(-TOTAL_UNITS_LOADED, -TOTAL_UNITS_DELIVERED,
+              -TRADE_CHANNEL_GENERAL, -SUB_TRADE_CHANNEL_FSR...MISC, 
+              -SUB_TRADE_CHANNEL_OTHER.DINING, 
+              -SUB_TRADE_CHANNEL_OTHER.OUTDOOR.ACTIVITIES, 
+              -TRADE_CHANNEL_OUTDOOR.ACTIVITIES) %>%   
+  step_normalize(all_numeric_predictors()) 
+
+# Prepare the recipe with the training data
+prepped <- prep(my_recipe, training = train_2024_data)
+
+# Apply the recipe to the training and test data
+train_transformed24 <- bake(prepped, new_data = train_2024_data)
+test_transformed24 <- bake(prepped, new_data = test_2024)
+
+# Build Linear Regression Model using multiple predictors
+lm_model_24 <- lm(TOTAL_UNITS_ORDERED ~ ., data = train_transformed24)
+
+# Make Predictions
+predictions_24 <- predict(lm_model_24, newdata = test_transformed24)
+
+# Manually Calculate RMSE, MAE, R-squared, and Adjusted R-squared
+rmse_value_24 <- sqrt(mean((test_transformed24$TOTAL_UNITS_ORDERED - predictions_24)^2))
+mae_value_24 <- mean(abs(test_transformed24$TOTAL_UNITS_ORDERED - predictions_24))
+r_squared_24 <- cor(test_transformed24$TOTAL_UNITS_ORDERED, predictions_24)^2
+
+# Adjusted R-squared calculation
+n_24 <- nrow(test_transformed24)  # Number of observations
+p_24 <- length(lm_model_24$coefficients) - 1  # Number of predictors
+adj_r_squared_24 <- 1 - ((1 - r_squared_24) * (n_24 - 1) / (n_24 - p_24 - 1))
+
+# Output Results
+cat("Linear Regression Model Performance:\n")
+cat("RMSE:", rmse_value_24, "\n")
+cat("R-squared:", r_squared_24, "\n")
+cat("MAE:", mae_value_24, "\n")
+cat("Adjusted R-Squared:", adj_r_squared_24, "\n")
+
+# View Predictions
+output_data_24 <- test_transformed24 %>%
+  mutate(Predicted_UNITS_ORDERED = predictions_24)
+```
+
+### LASSO & RIDGE for 2023
+
+```{r eval = FALSE }
+# Convert categorical variables to dummy variables
+x_train <- model.matrix(TOTAL_UNITS_ORDERED ~ ., data = train_transformed23)[,-1]
+x_test <- model.matrix(TOTAL_UNITS_ORDERED ~ ., data = test_transformed23)[,-1]
+y_train <- train_transformed23$TOTAL_UNITS_ORDERED
+
+# Ensure all features are numeric
+x_train <- as.matrix(x_train)
+x_test <- as.matrix(x_test)
+y_train <- as.numeric(y_train)
+
+# Ridge Regression (alpha = 0)
+ridge_model <- cv.glmnet(x_train, y_train, alpha = 0)  # Cross-validated Ridge
+ridge_preds <- predict(ridge_model, newx = x_test, s = "lambda.min")
+
+# Evaluate Ridge Model
+ridge_rmse <- sqrt(mean((test_transformed23$TOTAL_UNITS_ORDERED - ridge_preds)^2))
+ridge_mae <- mean(abs(test_transformed23$TOTAL_UNITS_ORDERED - ridge_preds))
+ridge_r2 <- cor(test_transformed23$TOTAL_UNITS_ORDERED, ridge_preds)^2
+
+# Adjusted R-squared Calculation
+n <- nrow(test_transformed23)
+p <- length(coef(ridge_model, s = "lambda.min")) - 1
+ridge_adj_r2 <- 1 - ((1 - ridge_r2) * (n - 1) / (n - p - 1))
+```
+
+### LASSO & RIDGE for 2024
+
+```{r eval = FALSE}
+# Convert categorical variables to dummy variables
+x_train_24 <- model.matrix(TOTAL_UNITS_ORDERED ~ ., data = train_transformed24)[,-1]
+x_test_24 <- model.matrix(TOTAL_UNITS_ORDERED ~ ., data = test_transformed24)[,-1]
+y_train_24 <- train_transformed24$TOTAL_UNITS_ORDERED
+
+# Ensure all features are numeric
+x_train_24 <- as.matrix(x_train_24)
+x_test_24 <- as.matrix(x_test_24)
+y_train_24 <- as.numeric(y_train_24)
+
+# Ridge Regression (alpha = 0)
+ridge_model_24 <- cv.glmnet(x_train_24, y_train_24, alpha = 0)  # Cross-validated Ridge
+ridge_preds_24 <- predict(ridge_model_24, newx = x_test_24, s = "lambda.min")
+
+# Evaluate Ridge Model
+ridge_rmse_24 <- sqrt(mean((test_transformed24$TOTAL_UNITS_ORDERED - ridge_preds_24)^2))
+ridge_mae_24 <- mean(abs(test_transformed24$TOTAL_UNITS_ORDERED - ridge_preds_24))
+ridge_r2_24 <- cor(test_transformed24$TOTAL_UNITS_ORDERED, ridge_preds_24)^2
+
+# Adjusted R-squared Calculation
+n_24 <- nrow(test_transformed24)
+p_24 <- length(coef(ridge_model_24, s = "lambda.min")) - 1
+ridge_adj_r2_24 <- 1 - ((1 - ridge_r2_24) * (n_24 - 1) / (n_24 - p_24 - 1))
+```
+
+### Linear Regression on Total Units Ordered for 2023
+
+```{r, eval=FALSE}
+my_recipe <- recipe(TOTAL_UNITS_ORDERED ~ ., data = server_train_2023_data) %>%
+  step_novel(all_nominal(), new_level = "Unknown") %>%
+  step_dummy(all_nominal(), -all_outcomes()) %>% # should prevent dummy variable trap 
+  step_nzv(all_predictors()) |> 
+  step_select(-TOTAL_UNITS_LOADED, -TOTAL_UNITS_DELIVERED,
+              -SUB_TRADE_CHANNEL_FSR...MISC, -SUB_TRADE_CHANNEL_OTHER.DINING, 
+              -TRADE_CHANNEL_GENERAL, -TRADE_CHANNEL_OUTDOOR.ACTIVITIES, 
+              -SUB_TRADE_CHANNEL_COMPREHENSIVE.PROVIDER) %>%   
+  step_normalize(all_numeric_predictors()) 
+
+# Prepare the recipe with the training data
+prepped <- prep(my_recipe, training = server_train_2023_data)
+
+# Apply the recipe to the training and test data
+train_transformed23 <- bake(prepped, new_data = server_train_2023_data)
+test_transformed23 <- bake(prepped, new_data = server_test_2023)
+
+# Now fit the model on the training set
+model <- lm(TOTAL_UNITS_ORDERED ~ ., data = train_transformed23)
+summary(model) # 0.791,	Adjusted R-squared:  0.7897
+
+# Make predictions on the test set
+predictions_2023 <- predict(model, newdata = test_transformed23)
+# predictions_2023
+
+# Compare predictions to actual value
+comparison <- data.frame(Actual = test_transformed23$TOTAL_UNITS_ORDERED, 
+                         Predicted = predictions_2023)
+
+# Evaluate the model performance
+print("R-squared of test data vs. actual data:")
+r2_value <- cor(test_transformed23$TOTAL_UNITS_ORDERED, predictions_2023)^2
+r2_value # 0.6027491
+
+# RMSE calculation
+print("RMSE calculation:")
+rmse_value <- sqrt(mean((test_transformed23$TOTAL_UNITS_ORDERED - predictions_2023)^2))
+print(rmse_value)
+
+# Check what concerns are going on
+print("Aliased coefficients:")
+alias(model)
+
+print("Multicollinearity:")
+vif(model)
+
+# Done with checking
+end_time <- Sys.time()
+
+# Print runtime
+execution_time <- end_time - start_time
+print("Execution time for first model:")
+print(execution_time)
+print("End of 2023 training and test, on to testing 2024:")
+
+# Want to check how long it takes to run the predictions on the 2023 model 
+start_time_2 <- Sys.time()
+
+# Apply the recipe to the 2024 full dataset
+full_transformed24 <- bake(prepped, new_data = full_2024)
+
+# Make predictions on the test set
+predictions_2024 <- predict(model, newdata = full_transformed24)
+
+# Evaluate the model performance
+print("R-squared of test data vs. actual data:")
+r2_value <- cor(full_2024$TOTAL_UNITS_ORDERED, predictions_2024)^2
+r2_value # 0.6027491
+
+# RMSE calculation
+print("RMSE calculation:")
+rmse_value <- sqrt(mean((full_2024$TOTAL_UNITS_ORDERED - predictions_2024)^2))
+print(rmse_value)
+
+# Done with checking
+end_time_2 <- Sys.time()
+```
+
+### Linear Regression on Total Units Ordered for 2024
+
+```{r, eval=FALSE}
+# Want to check how long it takes to run the predictions for the 2024 model 
+start_time_3 <- Sys.time()
+
+my_recipe <- recipe(TOTAL_UNITS_ORDERED ~ ., data = server_train_2024_data) %>%
+  step_novel(all_nominal(), new_level = "Unknown") %>%
+  step_dummy(all_nominal(), -all_outcomes()) %>% # should prevent dummy variable trap 
+  step_nzv(all_predictors()) |> 
+  step_select(-TOTAL_UNITS_LOADED, -TOTAL_UNITS_DELIVERED, - SUB_TRADE_CHANNEL_FSR...MISC, 
+              - SUB_TRADE_CHANNEL_OTHER.DINING, -SUB_TRADE_CHANNEL_COMPREHENSIVE.PROVIDER,-TRADE_CHANNEL_GENERAL,
+              -TRADE_CHANNEL_OUTDOOR.ACTIVITIES, -SUB_TRADE_CHANNEL_OTHER.OUTDOOR.ACTIVITIES) %>%   
+  step_normalize(all_numeric_predictors()) 
+
+# Prepare the recipe with the training data
+prepped <- prep(my_recipe, training = server_train_2024_data)
+
+# Apply the recipe to the training and test data
+train_transformed24 <- bake(prepped, new_data = server_train_2024_data)
+test_transformed24 <- bake(prepped, new_data = server_test_2024)
+
+# Now fit the model on the training set
+model <- lm(TOTAL_UNITS_ORDERED ~ ., data = train_transformed24)
+summary(model) #
+
+# Make predictions on the test set
+predictions_2024 <- predict(model, newdata = test_transformed24)
+
+# Evaluate the model performance
+print("R-squared calculation:")
+r2_value <- cor(test_transformed24$TOTAL_UNITS_ORDERED, predictions_2024)^2
+r2_value 
+
+# RMSE calculation
+print("RMSE calculation:")
+rmse_value <- sqrt(mean((test_transformed24$TOTAL_UNITS_ORDERED - predictions_2024)^2))
+print(rmse_value)
+
+# Done with checking
+end_time_3 <- Sys.time()
+```
+
+# Modeling Performance
+
+## Individual Model Performance
+
+In this section we will evaluate the strengths and weaknesses of each model and select the best one.
+
+**Performance Benchmark Models**
+
+- Mean Model
+    - R2: -7.89e-05
+    - RMSE: 7,025.563
+    - Run time: seconds
+- Median Model
+    - R2: -0.018
+    - RMSE: 7,089.417
+    - Run time: seconds
+    
+**Linear & Regularization Regression Models**
+
+- Linear Regression
+    - R2: .894
+    - RMSE: 2296.694
+    - Run time: seconds
+- Ridge Regression
+    - R2: .9390
+    - RMSE: 1745.471
+    - Run time: seconds
+- LASSO Regression
+    - R2: 0.9388962
+    - RMSE: 1751.195
+    - Run time: seconds
+- Elastic Net Regression
+    - R2:0.9388962
+    - RMSE: 1751.195
+    - Run time: minutes
+
+**Machine Learning Models**
+
+- Random Forest
+    - R2: 0.8688025
+    - RMSE: 2586.069
+    - Run time: < 15 minutes
+- XGBoost
+    - R2: 0.8593879
+    - RMSE: 2744.417
+    - Run time: < 15 minutes
+- Decision Tree
+    - R2: 0.903751
+    - RMSE: 2276.443
+    - Run time: < 15 minutes
+- Gradient Boosting Machine
+    - R2: 0.7381081
+    - RMSE: 3657.957
+    - Run time: < 15 minutes
+
+**Feature Importance & AIC-based Model Selection**
+
+- Stepwise Regression
+    - R2: 0.9582
+    - RMSE: 2296.694​.
+    - Run time: < 15 minutes
+
+**Time Series Models**
+
+- ARIMIA
+    - R2: NA
+    - RMSE: 34706.09
+    - Run time: minutes
+- ETS
+    - R2: NA
+    - RMSE: 36278.02
+    - Run time: minutes
+- Prophet
+    - R2: NA
+    - RMSE: 20393.23
+    - Run time: < 15 minutes
+- XGBoost 
+    - R2: NA
+    - RMSE: 12248.94
+    - Run time: < 15 minutes
+    
+**Timeframe Models**
+
+- Linear Model for 2023
+    - R2: .5249331
+    - RMSE: 80.3349
+    - Run time: < 5 minutes
+- Linear Model for 2024
+    - R2: .5172385
+    - RMSE: 99.42999
+    - Run time: < 5 minutes
+- LASSO & RIDGE Models for 2023
+    - R2: .5280962
+    - RMSE: 77.30866
+    - Run time: sec
+- LASSO & RIDGE Models for 2024
+    - R2: .5046999
+    - RMSE: 95.1086
+    - Run time: sec
+- Linear Regression on Total Units Ordered for 2023 using 2023 train and test set
+    - R2: 0.6332
+    - RMSE: 81.87398
+    - Run time: 2.195178 hours (full data on a server)
+    - Additional comments: These results are decent considering the issues found within the data.
+- Linear Regression on Total Units Ordered for 2023, using the 2024 test set
+    - R2: 0.572642
+    - RMSE: 92.60317
+    - Run time: 38.02309 minutes (full data on a server)
+    - Additional comments: Looks like R-squared lowered, but not by much.
+- Linear Regression on Total Units Ordered for 2024
+    - R2: 0.5744332
+    - RMSE: 80.42996
+    - Run time: 2.038676 hours (full data on a server)
+    - Additional comments: The good news is that we are seeing consistency here!
+
+## Discussion of the best model
+
+Among the 20 models evaluated, the Linear Regression model for Total Units Ordered in 2023 performed the best.
+
+Running the 2023 model on the full dataset took approximately 2.2 hours on a server. The Multiple R-squared and Adjusted R-squared for the training data were both 0.6332. For the test set, the R-squared value comparing predictions to actual data was 0.5635, with an RMSE of 81.87.
+
+Next, the same model was tested using the full 2024 dataset as the test set. The predictions for 2024 took about 38 minutes to process. The R-squared for the 2024 predictions was 0.5726, with an RMSE of 92.60. The encouraging takeaway is that the model demonstrates consistency across both years!
+
+# Results
+
+In this section we will summarize our findings.
+
+## Current Concerns with Modeling
+
+The regular dataset exhibited aliased coefficients and high multicollinearity. To address this, these problematic variables were removed from the training recipe. For reference, the 2023 and 2024 models had sub_trade_channel_fsr..misc and sub_trade_channel_other.dining as aliased coefficients. Additionally, sub_trade_channel_comprehensive.provider, trade_channel_general, and trade_channel_outdoor.activities had high variance inflation factors (VIF). Notably, the 2024 model also identified sub_trade_channel_other.outdoor.activities as having a high VIF. This raises the question of whether this small difference affects the generalizability of the models.
+
+One effective way to tackle this issue is by using a penalized linear regression model that tunes the penalty parameters through cross-validation to select the optimal outcome. This method allows the model to automatically determine whether Lasso, Ridge, or Elastic Net is most suitable for the given data. A key advantage of penalized linear regression is that it prevents overfitting while maintaining interpretability and performing automatic feature selection.
+
+Feature-engineered columns representing loaded difference and shipment difference were created. It is important to note that orders may not always be fully processed (loaded and delivered) on the same transaction date. Interestingly, these numbers generally aligned, but this is something to consider when interpreting the model results.
+
+## Business Validation and Interpretation of Current Models
+
+Our team deployed 20+ advanced models, with the Linear Regression model for Total Units Ordered in 2023 achieving the best performance, with an RMSE of 81.87. This model provides a decent level of predictive accuracy with the current methodology. Given this performance and Swire's current 400-unit threshold, the model could be a valuable tool for improving customer classification and optimizing delivery strategies.
+
+To further enhance usability, we will develop a comprehensive Tableau Dashboard. This dashboard will allow logistics teams and operations managers to conduct "what-if" analyses to determine the most effective thresholds for classifying deliveries into White Truck vs. Red Truck routes. Over time, this tool could facilitate automated truck assignments, reduce delivery costs, and improve overall operational efficiency. The ultimate goal is to integrate these insights into a sustainable strategy that supports long-term growth while maintaining logistical efficiency.
+
+## Future Looking
+
+Due to time constraints, clustering analysis was not completed on the data. A K-means clustering approach would be ideal to determine similarity between data points. If implemented, this analysis has the potential to identify more characteristics that distinguish customers with annual sales exceeding the determined volume threshold and those below. This method could use the full data Swire Coca Cola offered, both years 2023 and 2024.
+
+Moreover, while the current regression models are decent a good next step would be to re-attempt black-box models with adjustments accounting for multicollinearity. These are machine learning models that typically have high predictive power and efficiency, but lower levels of interpretability. However, Coca-Cola could potentially use their historical data to predict which ARTM customers have the potential to grow beyond the annual volume threshold. To ensure the model works well, cross validation should be done and model metrics should be evaluated. It is important to note there is a tradeoff between traditional models and black-box models, Coca Cola would need to determine what works best for them and their business needs.
+
+### Potential Improvements to the Data
+
+To enhance the analysis of fulfillment rates, delivery efficiency, and customer behavior, additional data could be beneficial.
+
+Key Data Improvements for Swire to consider: 
+
+- Customer-Level Data: More granular insights into purchasing patterns and preferences would enable better segmentation of customers by the defined threshold. This could improve marketing efforts and help forecast demand more accurately.
+- Order-Level Data: The data is currently aggregated by date and not Order ID. Adding additional columns such as Order IDs and timestamps to better track fulfillment trends and delivery performance.
+- Zip Code-Level Data: Instead of blinded full addresses and zip codes, removing full addresses and having accurate zip codes would allow for demographic comparisons while maintaining data privacy.
